@@ -1,0 +1,11 @@
+.idea/
+.pytest_cache/
+__pycache__/
+*.pyc
+cryptoflow.egg-info/
+.DS_Store
+.vercel/
+node_modules/
+web/.next/
+cryptoflow/data/*.csv
+cryptoflow/data/*.duckdb

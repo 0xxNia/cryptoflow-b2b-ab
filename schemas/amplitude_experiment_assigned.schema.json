@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/amplitude_experiment_assigned.schema.json",
+  "title": "Experiment Assigned",
+  "type": "object",
+  "required": ["event_type", "user_id", "event_properties"],
+  "properties": {
+    "event_type": { "const": "Experiment Assigned" },
+    "user_id": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string" },
+    "insert_id": { "type": "string" },
+    "event_properties": {
+      "type": "object",
+      "required": ["experiment_id", "variant_id", "assignment_version"],
+      "properties": {
+        "experiment_id": { "type": "string" },
+        "variant_id": { "type": "string" },
+        "assignment_version": { "type": "string" },
+        "market_regime": { "type": ["string", "null"] },
+        "schema_version": { "type": "integer" },
+        "source_system": { "type": "string" },
+        "platform": { "type": "string" },
+        "app_version": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

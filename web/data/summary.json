@@ -1,0 +1,39 @@
+{
+  "kpi": {
+    "total_users": 50000,
+    "trading_users": 47944,
+    "total_revenue": 25633562,
+    "activation_rate": 95.9,
+    "rev_per_user": 534.7
+  },
+  "ab_summary": {
+    "control": {
+      "n": 3968,
+      "mean_trades": 32.8354,
+      "mean_fee": 236.6469
+    },
+    "treatment": {
+      "n": 3993,
+      "mean_trades": 42.7077,
+      "mean_fee": 253.1599
+    }
+  },
+  "regimes": [
+    {
+      "name": "bull",
+      "share_pct": 34
+    },
+    {
+      "name": "bear",
+      "share_pct": 29
+    },
+    {
+      "name": "chop",
+      "share_pct": 24
+    },
+    {
+      "name": "high_vol",
+      "share_pct": 13
+    }
+  ]
+}
