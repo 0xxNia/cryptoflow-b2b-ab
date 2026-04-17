@@ -1,10 +1,12 @@
 """
 Professional A/B testing statistical engine.
 
-Three methods:
-  CUPED       — variance reduction via pre-experiment covariate
-  mSPRT       — always-valid sequential test (solves peeking problem)
-  Bayesian AB — Expected Loss in $, decision framework
+Methods:
+  CUPED              — variance reduction via pre-experiment covariate
+  mSPRT              — always-valid sequential test (solves peeking problem)
+  bayesian_ab        — Gaussian Expected Loss in $ (continuous metrics)
+  bayesian_ab_binary — Beta-Binomial Expected Loss (binary metrics: retention, CVR)
+  srm_test           — Sample Ratio Mismatch guard (chi-square GoF)
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -281,4 +283,200 @@ def bayesian_ab(
         expected_loss_hold_usd=float(el_hold * revenue_per_unit),
         decision=decision,
         threshold_pct=threshold_pct,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SRM — Sample Ratio Mismatch
+# Chi-square goodness-of-fit test on the observed assignment split.
+# Run BEFORE interpreting any A/B results; a detected SRM invalidates the test.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SRMResult:
+    observed_counts:  dict[str, int]    # variant → observed user count
+    expected_counts:  dict[str, float]  # variant → expected user count
+    expected_split:   dict[str, float]  # variant → intended proportion
+    chi2_stat:        float
+    p_value:          float
+    srm_detected:     bool              # True when p_value < alpha
+    message:          str               # human-readable verdict
+
+
+def srm_test(
+    observed_counts: dict[str, int],
+    expected_split:  dict[str, float] | None = None,
+    alpha:           float = 0.01,
+) -> SRMResult:
+    """
+    Sample Ratio Mismatch guard.
+
+    Compares the observed assignment counts to the intended split via a
+    chi-square goodness-of-fit test.  Uses alpha=0.01 (stricter than the
+    standard 0.05) because an SRM is an infrastructure failure, not an
+    experimental effect — false positives are cheap, false negatives are not.
+
+    observed_counts  : {"control": n_c, "treatment": n_t, ...}
+    expected_split   : {"control": 0.5, "treatment": 0.5}  (default: uniform)
+    """
+    if not observed_counts:
+        raise ValueError("observed_counts must not be empty")
+    if not (0 < alpha < 1):
+        raise ValueError("alpha must be in (0, 1)")
+
+    variants = list(observed_counts.keys())
+    obs      = np.array([observed_counts[v] for v in variants], dtype=float)
+    total    = obs.sum()
+
+    if total == 0:
+        raise ValueError("total observed count is zero")
+
+    if expected_split is None:
+        expected_split = {v: 1.0 / len(variants) for v in variants}
+
+    split_arr = np.array([expected_split.get(v, 0.0) for v in variants], dtype=float)
+    if not np.isclose(split_arr.sum(), 1.0, atol=1e-6):
+        raise ValueError("expected_split probabilities must sum to 1.0")
+
+    exp        = total * split_arr
+    safe_exp   = np.where(exp > 0, exp, 1.0)
+    chi2_stat  = float(np.sum((obs - exp) ** 2 / safe_exp))
+    p_value    = float(1.0 - spstats.chi2.cdf(chi2_stat, df=len(variants) - 1))
+    srm_flag   = p_value < alpha
+
+    if srm_flag:
+        actual = dict(zip(variants, (obs / total).round(4)))
+        target = dict(zip(variants, split_arr.round(4)))
+        message = (
+            f"SRM DETECTED (χ²={chi2_stat:.2f}, p={p_value:.5f} < α={alpha}). "
+            f"Observed split {actual} ≠ expected {target}. "
+            "Do NOT interpret A/B results until the root cause is resolved."
+        )
+    else:
+        message = (
+            f"No SRM detected (χ²={chi2_stat:.2f}, p={p_value:.4f} ≥ α={alpha}). "
+            "Assignment split is consistent with the intended design."
+        )
+
+    return SRMResult(
+        observed_counts={v: int(c) for v, c in zip(variants, obs)},
+        expected_counts={v: float(c) for v, c in zip(variants, exp)},
+        expected_split={v: float(s) for v, s in zip(variants, split_arr)},
+        chi2_stat=chi2_stat,
+        p_value=p_value,
+        srm_detected=srm_flag,
+        message=message,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Bayesian A/B — Beta-Binomial (binary metrics)
+# Monte Carlo Expected Loss for conversion rate, retention, activation.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class BayesianBinaryResult:
+    # Posterior hyperparameters (Beta distribution)
+    control_alpha:   float
+    control_beta:    float
+    treatment_alpha: float
+    treatment_beta:  float
+
+    # Point estimates
+    control_rate:      float   # MLE conversion rate, control
+    treatment_rate:    float   # MLE conversion rate, treatment
+    effect_pct_points: float   # treatment_rate − control_rate, in percentage points
+
+    # Monte Carlo summary (n_samples draws from posterior)
+    prob_treatment_wins: float
+    expected_loss_launch: float  # E[loss | launch] in percentage points
+    expected_loss_hold:   float  # E[loss | hold]   in percentage points
+    credible_interval_95: tuple[float, float]  # 95% CI on effect, in pct points
+
+    # Decision
+    decision:      str    # "launch" | "reject" | "gather_more_data"
+    threshold_pct: float
+    n_samples:     int
+
+
+def bayesian_ab_binary(
+    control_conversions:   int,
+    control_total:         int,
+    treatment_conversions: int,
+    treatment_total:       int,
+    prior_alpha:   float = 1.0,
+    prior_beta:    float = 1.0,
+    threshold_pct: float = 95.0,
+    n_samples:     int   = 50_000,
+    rng: np.random.Generator | None = None,
+) -> BayesianBinaryResult:
+    """
+    Bayesian A/B test for binary metrics (conversion, retention, activation).
+
+    Model: θ_c ~ Beta(α_c, β_c),  θ_t ~ Beta(α_t, β_t)
+    Prior: Beta(prior_alpha, prior_beta) — default is Jeffreys-like Beta(1,1).
+
+    Expected Loss is estimated via Monte Carlo:
+      E[loss | launch] = E[max(0, θ_c − θ_t)]  (regret if treatment is worse)
+      E[loss | hold]   = E[max(0, θ_t − θ_c)]  (opportunity cost if we don't launch)
+
+    Results are expressed in percentage points (× 100) for interpretability.
+    """
+    if control_total <= 0 or treatment_total <= 0:
+        raise ValueError("control_total and treatment_total must be positive")
+    if not (0 <= control_conversions <= control_total):
+        raise ValueError("control_conversions must be in [0, control_total]")
+    if not (0 <= treatment_conversions <= treatment_total):
+        raise ValueError("treatment_conversions must be in [0, treatment_total]")
+    if not (0 < threshold_pct < 100):
+        raise ValueError("threshold_pct must be in (0, 100)")
+    if n_samples < 1000:
+        raise ValueError("n_samples must be at least 1000 for reliable MC estimates")
+
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    # Beta-Binomial conjugate update
+    a_c = prior_alpha + control_conversions
+    b_c = prior_beta  + (control_total   - control_conversions)
+    a_t = prior_alpha + treatment_conversions
+    b_t = prior_beta  + (treatment_total - treatment_conversions)
+
+    # Monte Carlo draws from posteriors
+    theta_c = rng.beta(a_c, b_c, size=n_samples)
+    theta_t = rng.beta(a_t, b_t, size=n_samples)
+
+    diff        = theta_t - theta_c               # treatment − control
+    prob_win    = float(np.mean(diff > 0))
+    el_launch   = float(np.mean(np.maximum(0.0, -diff)))  # loss if we launch
+    el_hold     = float(np.mean(np.maximum(0.0,  diff)))  # loss if we hold
+
+    ci = (float(np.percentile(diff, 2.5)), float(np.percentile(diff, 97.5)))
+
+    threshold = threshold_pct / 100.0
+    if prob_win >= threshold:
+        decision = "launch"
+    elif (1.0 - prob_win) >= threshold:
+        decision = "reject"
+    else:
+        decision = "gather_more_data"
+
+    ctrl_rate = control_conversions   / control_total
+    trt_rate  = treatment_conversions / treatment_total
+
+    return BayesianBinaryResult(
+        control_alpha=float(a_c),
+        control_beta=float(b_c),
+        treatment_alpha=float(a_t),
+        treatment_beta=float(b_t),
+        control_rate=ctrl_rate,
+        treatment_rate=trt_rate,
+        effect_pct_points=(trt_rate - ctrl_rate) * 100.0,
+        prob_treatment_wins=prob_win,
+        expected_loss_launch=el_launch * 100.0,
+        expected_loss_hold=el_hold   * 100.0,
+        credible_interval_95=(ci[0] * 100.0, ci[1] * 100.0),
+        decision=decision,
+        threshold_pct=threshold_pct,
+        n_samples=n_samples,
     )

@@ -29,10 +29,6 @@ def get_connection():
 def _safe_float(value, default=0.0) -> float:
     if value is None:
         return float(default)
-
-
-def _sql_literal(value: str) -> str:
-    return value.replace("'", "''")
     try:
         if pd.isna(value):
             return float(default)
@@ -42,6 +38,10 @@ def _sql_literal(value: str) -> str:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _sql_literal(value: str) -> str:
+    return value.replace("'", "''")
 
 
 try:
