@@ -9,6 +9,7 @@ Public surface (import from submodules as needed):
   cryptoflow.metrics        — metric catalog
   cryptoflow.export         — Amplitude-style payloads
   cryptoflow.pipeline       — exposure log contracts
+  cryptoflow.integrity      — AA/SRM integrity guardrails
 """
 
 __version__ = "0.1.0"
