@@ -1,0 +1,13 @@
+.git
+.idea
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+.venv
+venv
+web/node_modules
+web/.next
+.vercel
+cryptoflow/data/*.duckdb
+cryptoflow/data/*.csv

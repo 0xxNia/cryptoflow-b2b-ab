@@ -17,10 +17,12 @@ import scipy.stats as spstats
 from calculator import required_sample_size, sensitivity_curve
 from agents import ROBOTS, SCENARIOS, simulate
 from stats import cuped, msprt, bayesian_ab
+from data_bootstrap import ensure_demo_database
 
 st.set_page_config(page_title="CryptoFlow Analytics", page_icon="📊", layout="wide")
 
 _DB_PATH = str(_HERE / "data" / "cryptoflow.duckdb")
+
 
 @st.cache_resource
 def get_connection():
@@ -45,6 +47,7 @@ def _sql_literal(value: str) -> str:
 
 
 try:
+    ensure_demo_database(_HERE)
     con = get_connection()
 except Exception as e:
     st.error(f"Database connection failed: {e}")
