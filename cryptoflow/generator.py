@@ -340,7 +340,9 @@ def generate_experiment(
 # emits A/B-framed exposure + transaction tables; CryptoMCSimulator is a pure
 # behavioural engine parameterised by Markov transition matrices.
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 
@@ -353,6 +355,11 @@ NUM_STATES:    Final[int] = 3
 
 MIN_VOLUME_USD: Final[float] = 1.0
 # Upper cap reuses VOLUME_CAP (= 5_000_000.0) defined earlier in the module.
+
+# Default user-batch size. At 250k users × 60 days the per-batch peak memory
+# stays in the ~250–350 MB range (state matrix + event DataFrame), so a single
+# worker can safely stream 5–10M-user populations without OOM.
+DEFAULT_BATCH_SIZE: Final[int] = 250_000
 
 
 # ── MCMC profile configuration ───────────────────────────────────────────────
@@ -511,44 +518,50 @@ class CryptoMCSimulator:
         self._states = states
         return states
 
-    # ── Event log orchestration ──────────────────────────────────────────────
+    # ── Single-batch simulation (streaming primitive) ────────────────────────
 
-    def generate_event_log(self) -> pd.DataFrame:
+    def _simulate_batch(self, batch_size: int) -> pd.DataFrame:
         """
-        Produce the transactional event log.
+        Simulate Markov chain + event extraction for one batch of users.
 
-        Columns: timestamp, user_id, profile, event_type, volume_usd.
-        One row per (user, day) where the user's state is Active.
+        Advances self.rng. Memory peak is bounded by batch_size:
+          state matrix    : batch_size × horizon_days × 1 byte
+          event DataFrame : O(active user-days in batch)
+        Returns an empty, correctly-typed DataFrame when the batch yields no events.
         """
-        self._generate_profiles()
-        self._simulate_markov_chain()
+        # 1. Profiles for this batch
+        profiles = self.rng.choice(
+            len(MCMC_PROFILES), size=batch_size, p=self._profile_weights,
+        ).astype(np.int8)
 
-        profiles = self._profiles  # type: ignore[assignment]
-        states   = self._states    # type: ignore[assignment]
+        # 2. Markov chain — only this batch's users materialized simultaneously
+        states = np.empty((batch_size, self.horizon_days), dtype=np.int8)
+        states[:, 0] = STATE_ACTIVE
+        for t in range(1, self.horizon_days):
+            cdfs = self._cdf[profiles, states[:, t - 1]]
+            r    = self.rng.random(size=batch_size)
+            states[:, t] = (r[:, np.newaxis] >= cdfs).sum(axis=1)
 
-        user_uuids = np.array(
-            [str(uuid.uuid4()) for _ in range(self.num_users)],
-            dtype=object,
-        )
-
+        # 3. Event extraction — (user, day) pairs where state is Active
         user_idx, day_idx = np.nonzero(states == STATE_ACTIVE)
-        n_events = user_idx.size
-
-        if n_events == 0:
+        if user_idx.size == 0:
             return pd.DataFrame(
                 {c: pd.Series(dtype=self._column_dtype(c)) for c in self.OUTPUT_COLUMNS}
             )
 
         event_profile_idx = profiles[user_idx]
-        mu                = self._profile_mu[event_profile_idx]
-        sigma             = self._profile_sigma[event_profile_idx]
+        mu    = self._profile_mu[event_profile_idx]
+        sigma = self._profile_sigma[event_profile_idx]
 
         volumes = self.rng.lognormal(mean=mu, sigma=sigma)
         np.clip(volumes, MIN_VOLUME_USD, VOLUME_CAP, out=volumes)
 
+        user_uuids = np.array(
+            [str(uuid.uuid4()) for _ in range(batch_size)], dtype=object,
+        )
         timestamps = self.start_date + pd.to_timedelta(day_idx, unit="D")
 
-        events_df = pd.DataFrame(
+        return pd.DataFrame(
             {
                 "timestamp":  timestamps,
                 "user_id":    user_uuids[user_idx],
@@ -559,6 +572,94 @@ class CryptoMCSimulator:
             columns=list(self.OUTPUT_COLUMNS),
         )
 
+    # ── Streaming API ────────────────────────────────────────────────────────
+
+    def stream_event_log(
+        self, batch_size: int | None = None,
+    ) -> Iterator[pd.DataFrame]:
+        """
+        Yield event DataFrames batch-by-batch without materializing the full log.
+
+        Use this for populations larger than a few hundred thousand users.
+        Each yielded DataFrame is sorted by (timestamp, user_id) within its batch;
+        consumers that need globally sorted output must merge-sort across batches.
+        """
+        if batch_size is None:
+            batch_size = DEFAULT_BATCH_SIZE
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        remaining = self.num_users
+        while remaining > 0:
+            n = min(batch_size, remaining)
+            df = self._simulate_batch(n)
+            if not df.empty:
+                df.sort_values(
+                    by=["timestamp", "user_id"],
+                    kind="stable", ignore_index=True, inplace=True,
+                )
+            yield df
+            remaining -= n
+
+    def write_parquet(
+        self,
+        output_dir:   str | Path,
+        batch_size:   int | None = None,
+        compression:  str  = "snappy",
+    ) -> dict:
+        """
+        Stream the event log to a partitioned Parquet dataset.
+
+        One file per batch: {output_dir}/part-00000.parquet, part-00001, ...
+        This is the recommended path for populations ≥ 1M users; the resulting
+        directory can be ingested directly by ClickHouse
+        (`INSERT INTO ... FROM INFILE '*.parquet' FORMAT Parquet`), DuckDB
+        (`read_parquet('{output_dir}/*.parquet')`), or Spark/Dask.
+        """
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        total_events = 0
+        total_bytes  = 0
+        n_batches    = 0
+        for batch_df in self.stream_event_log(batch_size):
+            if batch_df.empty:
+                continue
+            path = out / f"part-{n_batches:05d}.parquet"
+            batch_df.to_parquet(path, index=False, compression=compression)
+            total_events += len(batch_df)
+            total_bytes  += path.stat().st_size
+            n_batches    += 1
+
+        return {
+            "output_dir":  str(out),
+            "batches":     n_batches,
+            "events":      total_events,
+            "bytes":       total_bytes,
+            "compression": compression,
+        }
+
+    # ── Event log orchestration (in-memory convenience) ──────────────────────
+
+    def generate_event_log(
+        self, batch_size: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Produce the full transactional event log as a single in-memory DataFrame.
+
+        Streams internally in user batches to cap peak memory, then concatenates.
+        For populations that do not comfortably fit in RAM, prefer
+        `stream_event_log` or `write_parquet`.
+
+        Columns: timestamp, user_id, profile, event_type, volume_usd.
+        One row per (user, day) where the user's state was Active.
+        """
+        parts = [df for df in self.stream_event_log(batch_size) if not df.empty]
+        if not parts:
+            return pd.DataFrame(
+                {c: pd.Series(dtype=self._column_dtype(c)) for c in self.OUTPUT_COLUMNS}
+            )
+        events_df = pd.concat(parts, ignore_index=True, copy=False)
         events_df.sort_values(
             by=["timestamp", "user_id"], kind="stable", ignore_index=True, inplace=True,
         )

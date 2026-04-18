@@ -9,8 +9,12 @@
 --   enabling regime-conditional A/B analysis (e.g., "was the fee-reduction
 --   experiment effective during high_vol vs bear regimes?").
 --
--- Engine: MergeTree — append-only event log; no deduplication needed as
---         each event_id is globally unique.
+-- Engine: ReplacingMergeTree(ingest_time) — dedup on event_id when an event
+--         is retransmitted (mobile clients with flaky networks, ingestion
+--         retries). The row with the MAX(ingest_time) wins on merge; older
+--         stale copies are dropped. Queries that need guaranteed dedup at
+--         read time must add FINAL (or read the transaction_events_settled
+--         view defined below).
 -- Partition: (toDate(timestamp), experiment_id)
 -- ============================================================================
 
@@ -81,12 +85,15 @@ CREATE TABLE IF NOT EXISTS cryptoflow.transaction_events
     ingest_time         DateTime
         DEFAULT now()
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree(ingest_time)
 PARTITION BY (toDate(timestamp), experiment_id)
-ORDER BY   (experiment_id, variant_id, user_id, timestamp)
+ORDER BY   (experiment_id, variant_id, user_id, timestamp, event_id)
 SAMPLE BY   intHash32(user_id)
 SETTINGS
     index_granularity = 8192;
+-- event_id is included in ORDER BY so ReplacingMergeTree can collapse
+-- retransmissions of the same event (same event_id ⇒ identical upstream
+-- fields by construction). The row with MAX(ingest_time) is kept.
 
 
 -- Bloom-filter indexes for selective point lookups
@@ -99,8 +106,33 @@ ALTER TABLE cryptoflow.transaction_events
 
 
 -- ============================================================================
+-- View: transaction_events_settled
+-- Purpose: canonical read source for statistical inference.
+--          Applies the settlement window (default 48h) to exclude events
+--          that may still be affected by late-arriving retransmissions, and
+--          uses FINAL to materialize ReplacingMergeTree deduplication at
+--          query time. All mSPRT / CUPED / Bayesian / SRM pipelines MUST
+--          read from this view, not from the raw table, to avoid decisions
+--          on "ragged" cohorts.
+--
+-- DESIGN NOTE:
+--   Settlement window is 48h by default (crypto mobile clients retry up to
+--   24–48h after the original event). Tune via cryptoflow.settlement.py
+--   and redeploy this view if the business window changes.
+-- ============================================================================
+CREATE VIEW IF NOT EXISTS cryptoflow.transaction_events_settled AS
+SELECT *
+FROM cryptoflow.transaction_events FINAL
+WHERE timestamp <= now() - INTERVAL 48 HOUR;
+
+
+-- ============================================================================
 -- Materialized view: daily per-variant volume aggregates
 -- Used by the regime-conditional analysis pipeline (market.py)
+--
+-- Reads from the raw table for low-latency ingestion, but analysts MUST
+-- either (a) filter event_date to ≤ today()-2 when querying this MV, or
+-- (b) prefer the settled view above when correctness outweighs freshness.
 -- ============================================================================
 CREATE MATERIALIZED VIEW IF NOT EXISTS cryptoflow.mv_daily_volume
 ENGINE = SummingMergeTree()
