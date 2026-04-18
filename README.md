@@ -27,7 +27,7 @@ The demo database is **not** committed (see `.gitignore`). On first start in a c
 
 1. Push this repo to GitHub.
 2. In [Streamlit Community Cloud](https://streamlit.io/cloud), **New app** → pick the repo.
-3. Main file: `cryptoflow/dashboard.py`, branch: `main`, Python 3.10+.
+3. Main file path: **`streamlit_app.py`** (repo root, default in Cloud) or `cryptoflow/dashboard.py`, branch: `main`, Python 3.10+.
 4. Cloud uses root `requirements.txt`. After the app URL is live, optionally set in Vercel (project `web`): `NEXT_PUBLIC_STREAMLIT_URL` = that URL so the Next.js landing page links to the full UI.
 
 ### Docker (Fly.io, Railway, GCP, etc.)
