@@ -1,12 +1,17 @@
 """
 Streamlit Community Cloud entry when "Main file path" is streamlit_app.py.
 
-Loads cryptoflow/dashboard.py so __file__ resolves inside cryptoflow/ (paths + DB).
+set_page_config MUST run in this top-level file before any other Streamlit UI.
+Then loads cryptoflow/dashboard.py so __file__ stays inside cryptoflow/ (paths + DB).
 """
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+
+import streamlit as st
+
+st.set_page_config(page_title="CryptoFlow Analytics", page_icon="📊", layout="wide")
 
 _root = Path(__file__).resolve().parent
 _dashboard = _root / "cryptoflow" / "dashboard.py"

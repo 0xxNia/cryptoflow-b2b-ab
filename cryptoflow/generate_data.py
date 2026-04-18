@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 np.random.seed(42)
 START_DATE = datetime(2023, 1, 1)
 END_DATE   = datetime(2024, 6, 30)
-N_USERS    = 50_000
+N_USERS    = int(os.environ.get("CRYPTOFLOW_SEED_USERS", "50000"))
 OUTPUT_DIR = "data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 

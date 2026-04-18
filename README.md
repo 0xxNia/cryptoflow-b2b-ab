@@ -21,7 +21,7 @@ If you prefer not to install the package, add the repo root to `PYTHONPATH` and 
 
 ## Deploy full dashboard (Streamlit + DuckDB)
 
-The demo database is **not** committed (see `.gitignore`). On first start in a clean environment, `cryptoflow/data_bootstrap.py` runs `generate_data.py` once to create `cryptoflow/data/cryptoflow.duckdb` (can take a few minutes for 50k users).
+The demo database is **not** committed (see `.gitignore`). On first start in a clean environment, `cryptoflow/data_bootstrap.py` runs `generate_data.py` once to create `cryptoflow/data/cryptoflow.duckdb`. If `CRYPTOFLOW_SEED_USERS` is unset, bootstrap uses **12 000** users (enough for Streamlit Community Cloud memory limits). For a full **50 000**-user dataset locally, run `export CRYPTOFLOW_SEED_USERS=50000` before the first Streamlit start (or run `python cryptoflow/generate_data.py` manually in `cryptoflow/`).
 
 ### Streamlit Community Cloud
 

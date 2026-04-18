@@ -7,6 +7,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 import duckdb
 import plotly.graph_objects as go
 import plotly.express as px
@@ -19,7 +20,11 @@ from agents import ROBOTS, SCENARIOS, simulate
 from stats import cuped, msprt, bayesian_ab
 from data_bootstrap import ensure_demo_database
 
-st.set_page_config(page_title="CryptoFlow Analytics", page_icon="📊", layout="wide")
+try:
+    st.set_page_config(page_title="CryptoFlow Analytics", page_icon="📊", layout="wide")
+except StreamlitAPIException:
+    # Already set when launched via repo-root streamlit_app.py (Streamlit Cloud default).
+    pass
 
 _DB_PATH = str(_HERE / "data" / "cryptoflow.duckdb")
 
@@ -47,8 +52,9 @@ def _sql_literal(value: str) -> str:
 
 
 try:
-    ensure_demo_database(_HERE)
-    con = get_connection()
+    with st.spinner("Preparing demo database (first run only, may take a few minutes)…"):
+        ensure_demo_database(_HERE)
+        con = get_connection()
 except Exception as e:
     st.error(f"Database connection failed: {e}")
     st.stop()
